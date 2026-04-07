@@ -2,25 +2,42 @@ package task
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/wood-jp/xerrors"
+	"github.com/wood-jp/xerrors/errcontext"
 	"github.com/wood-jp/xerrors/errgroup"
+	"github.com/wood-jp/xerrors/stacktrace"
 )
+
+// ErrManagerStopped is returned when Run or RunEphemeral is called after the manager has stopped.
+var ErrManagerStopped = errors.New("manager already stopped")
+
+// ErrShutdownTimeout is returned by Wait when tasks do not stop within the shutdown timeout.
+var ErrShutdownTimeout = errors.New("shutdown timed out waiting for tasks to stop")
 
 // Manager manages a group of tasks that
 // should all stop when any one of them stops.
 type Manager struct {
-	ctx     context.Context
-	cancel  context.CancelFunc
-	group   *errgroup.Group
-	logger  *slog.Logger
-	cleanup []func()
+	ctx             context.Context
+	cancel          context.CancelFunc
+	group           *errgroup.Group
+	logger          *slog.Logger
+	cleanup         []func()
+	cleanupOnce     sync.Once
+	waitOnce        sync.Once
+	waitResult      error
+	shutdownTimeout time.Duration
 }
 
 type options struct {
-	logger *slog.Logger
+	logger          *slog.Logger
+	ctx             context.Context
+	shutdownTimeout time.Duration
 }
 
 // Option is an option func for NewManager.
@@ -33,44 +50,69 @@ func WithLogger(logger *slog.Logger) Option {
 	}
 }
 
+// WithContext sets a parent context for the manager. When the parent context is
+// cancelled, the manager will begin shutting down.
+func WithContext(ctx context.Context) Option {
+	return func(options *options) {
+		options.ctx = ctx
+	}
+}
+
+// WithShutdownTimeout sets the maximum duration to wait for tasks to stop after
+// the manager context is cancelled. Defaults to 30 seconds.
+func WithShutdownTimeout(d time.Duration) Option {
+	return func(options *options) {
+		options.shutdownTimeout = d
+	}
+}
+
 // NewManager creates a Manager.
 func NewManager(opts ...Option) *Manager {
 	options := options{
-		logger: slog.New(slog.DiscardHandler),
+		logger:          slog.New(slog.DiscardHandler),
+		ctx:             context.Background(),
+		shutdownTimeout: 30 * time.Second,
 	}
 
 	for _, opt := range opts {
 		opt(&options)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(options.ctx)
 	return &Manager{
-		ctx:    ctx,
-		cancel: cancel,
-		group:  errgroup.New(),
-		logger: options.logger,
+		ctx:             ctx,
+		cancel:          cancel,
+		group:           errgroup.New(),
+		logger:          options.logger,
+		shutdownTimeout: options.shutdownTimeout,
 	}
 }
 
 // Run immediately starts all of the given tasks.
-func (tm *Manager) Run(tasks ...Task) {
-	for _, task := range tasks {
-		t := task // local for closure
-
-		// errgroup recovers panics as errors.
-		tm.group.Go(tm.runTask(t, true))
+// Returns ErrManagerStopped if the manager has already stopped.
+func (tm *Manager) Run(tasks ...Task) error {
+	if tm.ctx.Err() != nil {
+		return stacktrace.Wrap(ErrManagerStopped)
 	}
+	for _, task := range tasks {
+		// errgroup recovers panics as errors.
+		tm.group.Go(tm.runTask(task, true))
+	}
+	return nil
 }
 
-// RunTerminable immediately starts all of the given tasks. These tasks are
+// RunEphemeral immediately starts all of the given tasks. These tasks are
 // expected to terminate without error while others continue running.
-func (tm *Manager) RunTerminable(tasks ...Task) {
-	for _, task := range tasks {
-		t := task // local for closure
-
-		// errgroup recovers panics as errors.
-		tm.group.Go(tm.runTask(t, false))
+// Returns ErrManagerStopped if the manager has already stopped.
+func (tm *Manager) RunEphemeral(tasks ...Task) error {
+	if tm.ctx.Err() != nil {
+		return stacktrace.Wrap(ErrManagerStopped)
 	}
+	for _, task := range tasks {
+		// errgroup recovers panics as errors.
+		tm.group.Go(tm.runTask(task, false))
+	}
+	return nil
 }
 
 // Cleanup registers a function that runs after all tasks are stopped.
@@ -82,12 +124,49 @@ func (tm *Manager) Cleanup(f func()) {
 
 // Wait blocks until all tasks are complete, then executes all registered
 // cleanup functions. It returns the first encountered error.
+// If tasks do not stop within the shutdown timeout after the context is cancelled,
+// Wait returns ErrShutdownTimeout.
+// Concurrent or repeated calls all return the same result.
 func (tm *Manager) Wait() error {
-	err := tm.group.Wait()
-	for _, f := range slices.Backward(tm.cleanup) {
-		f()
+	tm.waitOnce.Do(func() {
+		tm.waitResult = tm.wait()
+	})
+	return tm.waitResult
+}
+
+func (tm *Manager) wait() error {
+	done := make(chan error, 1)
+	go func() {
+		done <- tm.group.Wait()
+	}()
+
+	runCleanup := func() {
+		tm.cleanupOnce.Do(func() {
+			for _, f := range slices.Backward(tm.cleanup) {
+				f()
+			}
+		})
 	}
-	return err
+
+	select {
+	case err := <-done:
+		runCleanup()
+		return err
+	case <-tm.ctx.Done():
+	}
+
+	// Context was cancelled; wait for tasks to finish within the shutdown timeout.
+	timer := time.NewTimer(tm.shutdownTimeout)
+	defer timer.Stop()
+
+	select {
+	case err := <-done:
+		runCleanup()
+		return err
+	case <-timer.C:
+		runCleanup()
+		return stacktrace.Wrap(ErrShutdownTimeout)
+	}
 }
 
 // Stop cancels the context immediately and waits for all running tasks to complete.
@@ -100,7 +179,8 @@ func (tm *Manager) runTask(t Task, terminateAll bool) func() error {
 	return func() error {
 		tm.logger.Info("task starting", slog.String("task", t.Name()))
 		if err := t.Run(tm.ctx); err != nil {
-			tm.logger.Error("task failed", slog.String("task", t.Name()), xerrors.Log(err))
+			err = errcontext.Add(err, slog.String("task", t.Name()))
+			tm.logger.Error("task failed", xerrors.Log(err))
 			tm.cancel()
 			return err
 		}

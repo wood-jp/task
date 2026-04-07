@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/wood-jp/task"
 )
@@ -70,7 +71,7 @@ func TestTaskManagerStop(t *testing.T) {
 	tm.Cleanup(func() { cleanupCheck = append(cleanupCheck, 1) })
 	tm.Cleanup(func() { cleanupCheck = append(cleanupCheck, 2) })
 
-	tm.Run(task1, task2)
+	require.NoError(t, tm.Run(task1, task2))
 
 	err := tm.Stop()
 	assert.NoError(t, err)
@@ -92,7 +93,7 @@ func TestTaskManagerStopError(t *testing.T) {
 	tm.Cleanup(func() { cleanupCheck = append(cleanupCheck, 1) })
 	tm.Cleanup(func() { cleanupCheck = append(cleanupCheck, 2) })
 
-	tm.Run(task1, task2)
+	require.NoError(t, tm.Run(task1, task2))
 
 	err := tm.Stop()
 	assert.Error(t, err)
@@ -113,7 +114,7 @@ func TestTaskManagerRunError(t *testing.T) {
 		tm.Cleanup(func() { cleanupCheck = append(cleanupCheck, 1) })
 		tm.Cleanup(func() { cleanupCheck = append(cleanupCheck, 2) })
 
-		tm.Run(task1, task2)
+		require.NoError(t, tm.Run(task1, task2))
 
 		// task 2 encounters an error after it has started running
 		go func() {
@@ -142,7 +143,7 @@ func TestTaskManagerRun(t *testing.T) {
 		tm.Cleanup(func() { cleanupCheck = append(cleanupCheck, 1) })
 		tm.Cleanup(func() { cleanupCheck = append(cleanupCheck, 2) })
 
-		tm.Run(task1, task2)
+		require.NoError(t, tm.Run(task1, task2))
 
 		// task 2 stops without error after it has started running
 		go func() {
@@ -156,7 +157,7 @@ func TestTaskManagerRun(t *testing.T) {
 	})
 }
 
-func TestTaskManagerRunTerminable(t *testing.T) {
+func TestTaskManagerRunEphemeral(t *testing.T) {
 	t.Parallel()
 
 	synctest.Test(t, func(t *testing.T) {
@@ -170,8 +171,8 @@ func TestTaskManagerRunTerminable(t *testing.T) {
 		tm.Cleanup(func() { cleanupCheck = append(cleanupCheck, 1) })
 		tm.Cleanup(func() { cleanupCheck = append(cleanupCheck, 2) })
 
-		tm.Run(task1)
-		tm.RunTerminable(task2)
+		require.NoError(t, tm.Run(task1))
+		require.NoError(t, tm.RunEphemeral(task2))
 
 		// task 2 stops without error after it has started running
 		go func() {
@@ -195,4 +196,60 @@ func TestTaskManagerRunTerminable(t *testing.T) {
 		assert.ErrorIs(t, err, errTest)
 		assert.Equal(t, []int{2, 1}, cleanupCheck)
 	})
+}
+
+func TestManagerRunAfterStop(t *testing.T) {
+	t.Parallel()
+
+	tm := task.NewManager()
+	err := tm.Stop()
+	require.NoError(t, err)
+
+	err = tm.Run(NewTestTask("task1", nil))
+	assert.ErrorIs(t, err, task.ErrManagerStopped)
+}
+
+func TestManagerWithContext(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	tm := task.NewManager(task.WithContext(ctx))
+	task1 := NewTestTask("task1", nil)
+
+	require.NoError(t, tm.Run(task1))
+
+	// Cancel the parent context; the manager should stop.
+	cancel()
+
+	err := tm.Wait()
+	assert.NoError(t, err)
+}
+
+func TestManagerShutdownTimeout(t *testing.T) {
+	t.Parallel()
+	// Note: Cannot use synctest.Test here — the neverStopTask goroutine never exits,
+	// so goroutines in the bubble would never complete.
+
+	// stubTask ignores context cancellation and never stops on its own.
+	stubTask := &neverStopTask{}
+
+	tm := task.NewManager(task.WithShutdownTimeout(10 * time.Millisecond))
+	require.NoError(t, tm.Run(stubTask))
+
+	go func() {
+		tm.Stop() //nolint:errcheck
+	}()
+
+	err := tm.Wait()
+	assert.ErrorIs(t, err, task.ErrShutdownTimeout)
+}
+
+// neverStopTask is a task that blocks forever regardless of context cancellation.
+type neverStopTask struct{}
+
+func (t *neverStopTask) Name() string { return "never-stop" }
+func (t *neverStopTask) Run(_ context.Context) error {
+	select {} // block forever
 }

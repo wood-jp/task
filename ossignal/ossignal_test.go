@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"os"
 	"syscall"
 	"testing"
 	"time"
@@ -169,4 +170,82 @@ func TestContext(t *testing.T) {
 	case <-timer.C:
 		t.Fatal("task failed to stop when context was cancelled")
 	}
+}
+
+func TestAlreadyStarted(t *testing.T) {
+	t.Parallel()
+	// Note: Cannot use synctest.Test here because this uses OS signals
+
+	task := ossignal.NewTask(ossignal.WithSignals(syscall.SIGWINCH))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+
+	// Start the task in a goroutine.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- task.Run(ctx)
+	}()
+
+	// Give the goroutine a moment to start.
+	time.Sleep(5 * time.Millisecond)
+
+	// Second call should return ErrAlreadyStarted immediately.
+	err := task.Run(ctx)
+	assert.ErrorIs(t, err, ossignal.ErrAlreadyStarted)
+
+	// Clean up: cancel context so the first Run returns.
+	cancel()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(waitTime):
+		t.Fatal("first Run did not stop after context cancel")
+	}
+}
+
+func TestWithOnSignal(t *testing.T) {
+	t.Parallel()
+	// Note: Cannot use synctest.Test here because this uses OS signals
+
+	received := make(chan os.Signal, 1)
+	task := ossignal.NewTask(
+		ossignal.WithSignals(syscall.SIGPIPE),
+		ossignal.WithOnSignal(func(sig os.Signal) {
+			received <- sig
+		}),
+	)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- task.Run(t.Context())
+	}()
+
+	err := syscall.Kill(syscall.Getpid(), syscall.SIGPIPE)
+	require.NoError(t, err)
+
+	timer := time.NewTimer(waitTime)
+	t.Cleanup(func() { timer.Stop() })
+
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-timer.C:
+		t.Fatal("task failed to stop after signal")
+	}
+
+	select {
+	case sig := <-received:
+		assert.Equal(t, os.Signal(syscall.SIGPIPE), sig)
+	default:
+		t.Fatal("onSignal callback was not called")
+	}
+}
+
+func TestEmptySignalsPanic(t *testing.T) {
+	t.Parallel()
+
+	assert.Panics(t, func() {
+		ossignal.NewTask(ossignal.WithSignals())
+	})
 }

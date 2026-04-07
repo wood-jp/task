@@ -1,21 +1,27 @@
 // Package ossignal provides a Task that listens for signals from the operating system.
+// Signal capture begins at [NewTask] construction time.
 package ossignal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
+
+	"github.com/wood-jp/xerrors/stacktrace"
 )
 
-// DefaultSignals are the os signals that will cause this task to exit.
-var DefaultSignals = []os.Signal{
-	syscall.SIGINT,
-	syscall.SIGTERM,
-	syscall.SIGQUIT,
+// ErrAlreadyStarted is returned when Run is called on a Task that is already running.
+var ErrAlreadyStarted = errors.New("ossignal task already started")
+
+// DefaultSignals returns the os signals that will cause this task to exit.
+func DefaultSignals() []os.Signal {
+	return []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT}
 }
 
 // Task is a [task.Task] that waits for a termination signal from the OS.
@@ -24,6 +30,8 @@ type Task struct {
 	name     string
 	logger   *slog.Logger
 	logLevel slog.Level
+	started  atomic.Bool
+	onSignal func(os.Signal)
 }
 
 // options holds the configuration for a Task.
@@ -31,6 +39,7 @@ type options struct {
 	signals  []os.Signal
 	logger   *slog.Logger
 	logLevel slog.Level
+	onSignal func(os.Signal)
 }
 
 // Option is an option func for NewTask.
@@ -57,11 +66,19 @@ func WithSignals(signals ...os.Signal) Option {
 	}
 }
 
-// NewTask creates a new [Task].
+// WithOnSignal sets a callback that is invoked after the signal is logged.
+func WithOnSignal(fn func(os.Signal)) Option {
+	return func(options *options) {
+		options.onSignal = fn
+	}
+}
+
+// NewTask creates a new [Task]. Signal capture begins immediately upon construction.
+// Panics if the resolved signals list is empty.
 func NewTask(opts ...Option) *Task {
 	// Set up default options
 	options := options{
-		signals:  DefaultSignals,
+		signals:  DefaultSignals(),
 		logger:   slog.New(slog.DiscardHandler),
 		logLevel: slog.LevelInfo,
 	}
@@ -69,6 +86,10 @@ func NewTask(opts ...Option) *Task {
 	// Apply provided options
 	for _, opt := range opts {
 		opt(&options)
+	}
+
+	if len(options.signals) == 0 {
+		panic("ossignal: NewTask requires at least one signal")
 	}
 
 	sigNames := make([]string, len(options.signals))
@@ -80,6 +101,7 @@ func NewTask(opts ...Option) *Task {
 		name:     fmt.Sprintf("os signal task (%s)", strings.Join(sigNames, ", ")),
 		logger:   options.logger,
 		logLevel: options.logLevel,
+		onSignal: options.onSignal,
 	}
 	signal.Notify(task.sigCh, options.signals...)
 	return task
@@ -91,10 +113,18 @@ func (t *Task) Name() string {
 }
 
 // Run blocks until an OS signal is received or the context is cancelled, then returns nil.
+// Returns ErrAlreadyStarted if called more than once.
 func (t *Task) Run(ctx context.Context) error {
+	if !t.started.CompareAndSwap(false, true) {
+		return stacktrace.Wrap(ErrAlreadyStarted)
+	}
+
 	select {
 	case sig := <-t.sigCh:
 		t.logger.Log(context.Background(), t.logLevel, "os signal received", slog.String("signal", sig.String()))
+		if t.onSignal != nil {
+			t.onSignal(sig)
+		}
 	case <-ctx.Done():
 	}
 
