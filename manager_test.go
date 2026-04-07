@@ -59,6 +59,10 @@ func TestTaskManagerStop(t *testing.T) {
 	logger := NewTestLogger(t)
 	tm := task.NewManager(task.WithLogger(logger))
 
+	ctx := tm.Context()
+	assert.NotNil(t, ctx)
+	assert.NoError(t, ctx.Err())
+
 	task1 := NewTestTask("task1", nil)
 	task2 := NewTestTask("task2", nil)
 
@@ -71,6 +75,8 @@ func TestTaskManagerStop(t *testing.T) {
 	err := tm.Stop()
 	assert.NoError(t, err)
 	assert.Equal(t, []int{2, 1}, cleanupCheck)
+
+	assert.ErrorIs(t, ctx.Err(), context.Canceled)
 }
 
 func TestTaskManagerStopError(t *testing.T) {
