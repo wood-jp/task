@@ -35,12 +35,10 @@ func WithLogger(logger *slog.Logger) Option {
 
 // NewManager creates a Manager.
 func NewManager(opts ...Option) *Manager {
-	// Set up default options
 	options := options{
 		logger: slog.New(slog.DiscardHandler),
 	}
 
-	// Apply provided options
 	for _, opt := range opts {
 		opt(&options)
 	}
@@ -59,20 +57,18 @@ func (tm *Manager) Run(tasks ...Task) {
 	for _, task := range tasks {
 		t := task // local for closure
 
-		// Note: calm/errgroup will recover
-		// a panic as an error, so we don't need to
+		// errgroup recovers panics as errors.
 		tm.group.Go(tm.runTask(t, true))
 	}
 }
 
-// Run immediately starts all of the given tasks. These tasks are expected to
-// to terminate without error, while others continue running.
+// RunTerminable immediately starts all of the given tasks. These tasks are
+// expected to terminate without error while others continue running.
 func (tm *Manager) RunTerminable(tasks ...Task) {
 	for _, task := range tasks {
 		t := task // local for closure
 
-		// Note: calm/errgroup will recover
-		// a panic as an error, so we don't need to
+		// errgroup recovers panics as errors.
 		tm.group.Go(tm.runTask(t, false))
 	}
 }
@@ -85,8 +81,7 @@ func (tm *Manager) Cleanup(f func()) {
 }
 
 // Wait blocks until all tasks are complete, then executes all registered
-// cleanup functions.
-// Wait returns the first encountered error.
+// cleanup functions. It returns the first encountered error.
 func (tm *Manager) Wait() error {
 	err := tm.group.Wait()
 	for _, f := range slices.Backward(tm.cleanup) {
@@ -111,8 +106,8 @@ func (tm *Manager) runTask(t Task, terminateAll bool) func() error {
 		}
 
 		if terminateAll {
-			// when the task completes, regardless of why, cancel the context
-			// so that other tasks know they should also stop
+			// When the task completes, regardless of why, cancel the context
+			// so that other tasks know they should also stop.
 			defer tm.cancel()
 		}
 
