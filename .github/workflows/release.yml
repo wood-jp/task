@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Dry run: calculate version without creating tag or release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # to create tags and releases
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate running on default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DEFAULT_BRANCH=$(gh repo view ${{ github.repository }} --json defaultBranchRef --jq '.defaultBranchRef.name')
+          CURRENT_BRANCH="${GITHUB_REF#refs/heads/}"
+          if [ "$CURRENT_BRANCH" != "$DEFAULT_BRANCH" ]; then
+            echo "error: Release workflow must run on default branch ($DEFAULT_BRANCH), not $CURRENT_BRANCH."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Execute Release
+        id: release
+        # In dry-run mode, go-semantic-release exits without writing .version, which
+        # causes the action wrapper to error with ENOENT. continue-on-error lets the
+        # workflow proceed so subsequent summary steps can still run.
+        continue-on-error: ${{ inputs.dry-run == true }}
+        uses: go-semantic-release/action@2e9dc4247a6004f8377781bef4cb9dad273a741f # v1.24.1
+        with:
+          github-token: ${{ secrets.RELEASE_PAT }}
+          force-bump-patch-version: false
+          changelog-generator-opt: "emojis=true"
+          # --allow-initial-development-versions keeps major pinned at 0 until explicitly ready for 1.0
+          # major_release_rules=breaking is not an allowed commit type — prevents automated major releases
+          custom-arguments: >-
+            ${{ inputs.dry-run && '--dry' || '' }}
+            --commit-analyzer-opt patch_release_rules=fix,refactor,test,build,chore,docs
+            --commit-analyzer-opt minor_release_rules=feat
+            --commit-analyzer-opt major_release_rules=breaking
+
+      - name: Write summary (dry run)
+        if: ${{ inputs.dry-run }}
+        run: |
+          {
+            echo "## Dry Run — Release Preview"
+            echo ""
+            echo "See job logs above for the calculated version."
+            echo ""
+            if [ -f .generated-go-semantic-release-changelog.md ]; then
+              echo "### Release Notes"
+              echo ""
+              cat .generated-go-semantic-release-changelog.md
+            else
+              echo "_No release would be created (no releasable commits since last release)._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Write summary
+        if: ${{ !inputs.dry-run && steps.release.outputs.version != '' }}
+        run: |
+          {
+            echo "## Release Created"
+            echo ""
+            echo "**Tag:** [v${{ steps.release.outputs.version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.release.outputs.version }})"
+          } >> "$GITHUB_STEP_SUMMARY"
