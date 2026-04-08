@@ -2,8 +2,8 @@
 
 ## Supported Versions
 
-Only the latest release receives security fixes. Pre-v1.0 has no stability guarantees,
-but vulnerability reports are still welcome.
+Only the latest v1.x release receives security fixes. v1.x releases follow semantic
+versioning — no breaking changes within the major version.
 
 ## Reporting a Vulnerability
 

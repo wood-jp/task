@@ -274,7 +274,7 @@ func TestManagerShutdownTimeout(t *testing.T) {
 	require.NoError(t, tm.Run(stubTask))
 
 	go func() {
-		tm.Stop() //nolint:errcheck
+		tm.Stop() //nolint:errcheck // return value checked via tm.Wait() below
 	}()
 
 	err := tm.Wait()
