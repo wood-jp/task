@@ -9,17 +9,12 @@ import (
 	"github.com/wood-jp/task"
 )
 
-// Action is a function executed on each poll interval.
-// It must return nil when the context is cancelled; a non-nil error
-// either terminates the task (default) or is logged and discarded (WithContinueOnError).
-type Action func(context.Context) error
-
-// Task is a [task.Task] that executes an Action on a fixed interval using a ticker.
+// Task is a [task.Task] that executes a [task.Action] on a fixed interval using a ticker.
 // Unlike loop.Task, the interval is clock-based: ticks fire regardless of how long
 // the action takes. If the action takes longer than the interval, the next tick
 // fires immediately after it completes (Go's ticker coalesces missed ticks).
 type Task struct {
-	action          Action
+	action          task.Action
 	name            string
 	interval        time.Duration
 	logger          *slog.Logger
@@ -59,7 +54,9 @@ func WithContinueOnError() Option {
 // NewTask creates a new poll Task. action is called on every interval tick.
 // name is used in Name() (returned as "poll: <name>").
 // Panics if interval is less than or equal to zero.
-func NewTask(action Action, name string, interval time.Duration, opts ...Option) *Task {
+// action must return nil when the context is cancelled; a non-nil error
+// either terminates the task (default) or is logged and discarded (WithContinueOnError).
+func NewTask(action task.Action, name string, interval time.Duration, opts ...Option) *Task {
 	if interval <= 0 {
 		panic("poll: interval must be greater than zero")
 	}

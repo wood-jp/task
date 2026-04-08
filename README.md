@@ -24,6 +24,7 @@ Manage a group of long-running background tasks that all stop when any one of th
 - [Guard](#guard)
 - [Subpackages](#subpackages)
   - [ossignal](#ossignal)
+  - [Action-based subpackages](#action-based-subpackages)
   - [loop](#loop)
   - [poll](#poll)
   - [sigtrigger](#sigtrigger)
@@ -199,18 +200,36 @@ Other options:
 | `WithSignals(signals...)` | SIGINT, SIGTERM, SIGQUIT | Signals to listen for |
 | `WithOnSignal(fn)` | none | Callback invoked after the signal is logged |
 
+### Action-based subpackages
+
+`loop`, `poll`, and `sigtrigger` are three variations of the same idea: wrap a `task.Action` in a `Task` that calls it repeatedly under different triggering conditions. The action signature is the same in all three:
+
+```go
+func(ctx context.Context) error
+```
+
+The only difference is *what causes the action to fire*:
+
+| Package | Trigger |
+| --- | --- |
+| `loop` | The previous action completed (completion-based) |
+| `poll` | A clock tick fired (time-based) |
+| `sigtrigger` | An OS signal was received (event-based) |
+
+All three share the same error behaviour: by default an action error propagates and triggers manager shutdown; `WithContinueOnError` logs the error and keeps running instead.
+
 ### loop
 
 ```text
 github.com/wood-jp/task/loop
 ```
 
-A `Task` implementation that repeatedly creates and runs an ephemeral task via a factory function. If the inner task returns `nil`, a new one is created and run again. If the factory or inner task returns an error, it is propagated and triggers shutdown. This enables patterns like "run this worker forever, restarting it cleanly each time it finishes."
+Calls the action in a tight loop: as soon as one call returns `nil`, the next begins (after an optional delay). Use this for work that should run continuously, restarting immediately after each completion.
 
 ```go
 worker := loop.NewTask(
-    func(ctx context.Context) (task.Task, error) {
-        return NewWorker(ctx, db)
+    func(ctx context.Context) error {
+        return processNextBatch(ctx, db)
     },
     "worker",
     loop.WithLogger(logger),
@@ -223,12 +242,12 @@ if err := m.Wait(); err != nil {
 }
 ```
 
-The delay between runs (default: none) is measured from the completion of one run to the start of the next, so runs never overlap:
+The delay between runs is measured from the completion of one call to the start of the next, so calls never overlap:
 
 ```go
-worker := loop.NewTask(factory, "worker",
-    loop.WithDelay(5*time.Second),     // sleep between runs
-    loop.WithInitialDelay(),           // also sleep before the first run
+worker := loop.NewTask(action, "worker",
+    loop.WithDelay(5*time.Second),  // sleep between runs
+    loop.WithInitialDelay(),        // also sleep before the first run
 )
 ```
 
@@ -239,6 +258,7 @@ Options:
 | `WithLogger(logger)` | discard | Logger for per-run start/complete events |
 | `WithDelay(d)` | 0 | Sleep between runs (context-aware) |
 | `WithInitialDelay()` | false | Also apply the delay before the first run |
+| `WithContinueOnError()` | false | Log action errors and keep looping instead of propagating |
 
 ### poll
 
@@ -246,9 +266,7 @@ Options:
 github.com/wood-jp/task/poll
 ```
 
-A `Task` implementation that executes an action function on a fixed interval using a ticker. Unlike `loop`, the interval is clock-based: ticks fire regardless of how long the action takes. If the action takes longer than the interval, the next tick fires immediately after it completes (Go's ticker coalesces missed ticks).
-
-By default, an error from the action propagates and triggers shutdown. Use `WithContinueOnError` to log the error and keep ticking instead.
+Calls the action on a fixed clock interval using a ticker. The interval is time-based: ticks fire regardless of how long the action takes. If the action takes longer than the interval, the next tick fires immediately after it completes (Go's ticker coalesces missed ticks).
 
 ```go
 poller := poll.NewTask(
@@ -267,7 +285,7 @@ if err := m.Wait(); err != nil {
 }
 ```
 
-Use `WithRunAtStart` to execute the action immediately when `Run` is called, before the first tick:
+Use `WithRunAtStart` to call the action immediately when `Run` is called, before the first tick:
 
 ```go
 poller := poll.NewTask(action, "state-sync", 30*time.Second,
@@ -280,7 +298,7 @@ Options:
 | Option | Default | Description |
 | --- | --- | --- |
 | `WithLogger(logger)` | discard | Logger used when `WithContinueOnError` is active |
-| `WithRunAtStart()` | false | Execute the action immediately before the first tick |
+| `WithRunAtStart()` | false | Call the action immediately before the first tick |
 | `WithContinueOnError()` | false | Log action errors and keep ticking instead of propagating |
 
 ### sigtrigger
@@ -289,7 +307,9 @@ Options:
 github.com/wood-jp/task/sigtrigger
 ```
 
-A `Task` implementation that executes an action each time a configured OS signal is received. Unlike `ossignal`, which exits on the first signal, `sigtrigger` stays alive and re-runs the action on every signal delivery. Signal capture begins at construction time, so no signals are missed between `NewTask` and `Run`.
+Calls the action each time a configured OS signal is received. Unlike `ossignal`, which exits on the first signal, `sigtrigger` stays alive and re-runs the action on every delivery. Signal capture begins at construction time, so no signals are missed between `NewTask` and `Run`.
+
+The signal channel has a buffer of one. A signal received while the action is running queues up and triggers another run immediately after the current one completes. Additional signals beyond that one are dropped (standard Go signal delivery behaviour).
 
 ```go
 trig := sigtrigger.NewTask(
@@ -311,15 +331,6 @@ By default, `sigtrigger.NewTask` listens for `SIGHUP`. Override with `WithSignal
 ```go
 trig := sigtrigger.NewTask(action,
     sigtrigger.WithSignals(syscall.SIGUSR1),
-)
-```
-
-By default, an error from the action propagates and terminates the task (triggering manager shutdown). Use `WithContinueOnError` to log the error and keep running instead:
-
-```go
-trig := sigtrigger.NewTask(action,
-    sigtrigger.WithContinueOnError(),
-    sigtrigger.WithLogger(logger),
 )
 ```
 
