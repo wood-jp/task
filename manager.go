@@ -250,6 +250,8 @@ func (tm *Manager) runTask(t Task, terminateAll bool) func() error {
 	return func() error {
 		tm.logger.Info("task starting", slog.String("task", t.Name()))
 		if err := t.Run(tm.ctx); err != nil {
+			// A non-nil error means the task failed, not that it was cancelled.
+			// Well-behaved tasks return nil when the context is cancelled.
 			err = errcontext.Add(err, slog.String("task", t.Name()))
 			tm.logger.Error("task failed", xerrors.Log(err))
 			tm.cancel()
