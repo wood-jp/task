@@ -24,6 +24,7 @@ Manage a group of long-running background tasks that all stop when any one of th
 - [Subpackages](#subpackages)
   - [ossignal](#ossignal)
   - [loop](#loop)
+  - [poll](#poll)
 - [Contributing](#contributing)
 - [Security](#security)
 - [Attribution](#attribution)
@@ -216,6 +217,49 @@ Options:
 | `WithLogger(logger)` | discard | Logger for per-run start/complete events |
 | `WithDelay(d)` | 0 | Sleep between runs (context-aware) |
 | `WithInitialDelay()` | false | Also apply the delay before the first run |
+
+### poll
+
+```text
+github.com/wood-jp/task/poll
+```
+
+A `Task` implementation that executes an action function on a fixed interval using a ticker. Unlike `loop`, the interval is clock-based: ticks fire regardless of how long the action takes. If the action takes longer than the interval, the next tick fires immediately after it completes (Go's ticker coalesces missed ticks).
+
+By default, an error from the action propagates and triggers shutdown. Use `WithContinueOnError` to log the error and keep ticking instead.
+
+```go
+poller := poll.NewTask(
+    func(ctx context.Context) error {
+        return syncState(ctx, db)
+    },
+    "state-sync",
+    30*time.Second,
+    poll.WithLogger(logger),
+)
+
+m := task.NewManager(task.WithLogger(logger))
+m.Run(sig, poller)
+if err := m.Wait(); err != nil {
+    log.Fatal(err)
+}
+```
+
+Use `WithRunAtStart` to execute the action immediately when `Run` is called, before the first tick:
+
+```go
+poller := poll.NewTask(action, "state-sync", 30*time.Second,
+    poll.WithRunAtStart(),
+)
+```
+
+Options:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `WithLogger(logger)` | discard | Logger used when `WithContinueOnError` is active |
+| `WithRunAtStart()` | false | Execute the action immediately before the first tick |
+| `WithContinueOnError()` | false | Log action errors and keep ticking instead of propagating |
 
 ## Contributing
 
