@@ -4,20 +4,15 @@ package ossignal
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
-	"sync/atomic"
 	"syscall"
 
-	"github.com/wood-jp/xerrors/stacktrace"
+	"github.com/wood-jp/task"
 )
-
-// ErrAlreadyStarted is returned when Run is called on a Task that is already running.
-var ErrAlreadyStarted = errors.New("ossignal task already started")
 
 // DefaultSignals returns the os signals that will cause this task to exit.
 func DefaultSignals() []os.Signal {
@@ -30,7 +25,7 @@ type Task struct {
 	name     string
 	logger   *slog.Logger
 	logLevel slog.Level
-	started  atomic.Bool
+	guard    task.Guard
 	onSignal func(os.Signal)
 }
 
@@ -115,8 +110,8 @@ func (t *Task) Name() string {
 // Run blocks until an OS signal is received or the context is cancelled, then returns nil.
 // Returns ErrAlreadyStarted if called more than once.
 func (t *Task) Run(ctx context.Context) error {
-	if !t.started.CompareAndSwap(false, true) {
-		return stacktrace.Wrap(ErrAlreadyStarted)
+	if err := t.guard.TryStart(); err != nil {
+		return err
 	}
 
 	select {

@@ -273,7 +273,7 @@ func TestAlreadyStarted(t *testing.T) {
 		synctest.Wait()
 
 		err := lt.Run(ctx)
-		assert.ErrorIs(t, err, loop.ErrAlreadyStarted)
+		assert.ErrorIs(t, err, task.ErrAlreadyStarted)
 
 		cancel()
 		select {
