@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -28,7 +27,7 @@ func sendSignal(t *testing.T, sig syscall.Signal) {
 func TestName(t *testing.T) {
 	t.Parallel()
 
-	tsk := sigtrigger.NewTask(sigtrigger.WithSignals(syscall.SIGHUP))
+	tsk := sigtrigger.NewTask(func(_ context.Context) error { return nil }, sigtrigger.WithSignals(syscall.SIGHUP))
 	assert.Equal(t, "sigtrigger task (hangup)", tsk.Name())
 }
 
@@ -38,11 +37,11 @@ func TestActionCalledOnSignal(t *testing.T) {
 
 	called := make(chan struct{}, 1)
 	tsk := sigtrigger.NewTask(
-		sigtrigger.WithSignals(syscall.SIGHUP),
-		sigtrigger.WithAction(func(_ context.Context) error {
+		func(_ context.Context) error {
 			called <- struct{}{}
 			return nil
-		}),
+		},
+		sigtrigger.WithSignals(syscall.SIGHUP),
 	)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -71,62 +70,14 @@ func TestActionCalledOnSignal(t *testing.T) {
 	}
 }
 
-func TestMultipleActionsExecuteInOrder(t *testing.T) {
-	t.Parallel()
-	// Note: Cannot use synctest.Test here because this uses OS signals
-
-	var order []int
-	done := make(chan struct{}, 1)
-
-	tsk := sigtrigger.NewTask(
-		sigtrigger.WithSignals(syscall.SIGUSR1),
-		sigtrigger.WithAction(func(_ context.Context) error {
-			order = append(order, 1)
-			return nil
-		}),
-		sigtrigger.WithAction(func(_ context.Context) error {
-			order = append(order, 2)
-			done <- struct{}{}
-			return nil
-		}),
-	)
-
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- tsk.Run(ctx) }()
-
-	sendSignal(t, syscall.SIGUSR1)
-
-	timer := time.NewTimer(waitTime)
-	t.Cleanup(func() { timer.Stop() })
-	select {
-	case <-done:
-		assert.Equal(t, []int{1, 2}, order)
-	case <-timer.C:
-		t.Fatal("actions did not complete after signal")
-	}
-
-	cancel()
-	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(waitTime):
-		t.Fatal("task did not stop after context cancel")
-	}
-}
-
 func TestActionErrorTerminates(t *testing.T) {
 	t.Parallel()
 	// Note: Cannot use synctest.Test here because this uses OS signals
 
 	actionErr := errors.New("action failed")
 	tsk := sigtrigger.NewTask(
+		func(_ context.Context) error { return actionErr },
 		sigtrigger.WithSignals(syscall.SIGUSR2),
-		sigtrigger.WithAction(func(_ context.Context) error {
-			return actionErr
-		}),
 	)
 
 	errCh := make(chan error, 1)
@@ -151,18 +102,15 @@ func TestContinueOnError(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
 
-	secondCalled := make(chan struct{}, 1)
+	count := make(chan struct{}, 5)
 	tsk := sigtrigger.NewTask(
+		func(_ context.Context) error {
+			count <- struct{}{}
+			return errors.New("transient error")
+		},
 		sigtrigger.WithSignals(syscall.SIGCONT),
 		sigtrigger.WithLogger(logger),
 		sigtrigger.WithContinueOnError(),
-		sigtrigger.WithAction(func(_ context.Context) error {
-			return errors.New("transient error")
-		}),
-		sigtrigger.WithAction(func(_ context.Context) error {
-			secondCalled <- struct{}{}
-			return nil
-		}),
 	)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -171,15 +119,16 @@ func TestContinueOnError(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- tsk.Run(ctx) }()
 
-	sendSignal(t, syscall.SIGCONT)
-
-	timer := time.NewTimer(waitTime)
-	t.Cleanup(func() { timer.Stop() })
-	select {
-	case <-secondCalled:
-		// second action ran despite first erroring
-	case <-timer.C:
-		t.Fatal("second action was not called — error may have terminated the task")
+	// Send two signals; the task should keep running despite errors.
+	for range 2 {
+		sendSignal(t, syscall.SIGCONT)
+		timer := time.NewTimer(waitTime)
+		select {
+		case <-count:
+			timer.Stop()
+		case <-timer.C:
+			t.Fatal("action was not called after signal")
+		}
 	}
 
 	cancel()
@@ -197,7 +146,10 @@ func TestContextCancellation(t *testing.T) {
 	t.Parallel()
 	// Note: Cannot use synctest.Test here because this uses OS signals
 
-	tsk := sigtrigger.NewTask(sigtrigger.WithSignals(syscall.SIGIO))
+	tsk := sigtrigger.NewTask(
+		func(_ context.Context) error { return nil },
+		sigtrigger.WithSignals(syscall.SIGIO),
+	)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
@@ -229,7 +181,10 @@ func TestErrAlreadyStarted(t *testing.T) {
 	t.Parallel()
 	// Note: Cannot use synctest.Test here because this uses OS signals
 
-	tsk := sigtrigger.NewTask(sigtrigger.WithSignals(syscall.SIGWINCH))
+	tsk := sigtrigger.NewTask(
+		func(_ context.Context) error { return nil },
+		sigtrigger.WithSignals(syscall.SIGWINCH),
+	)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
@@ -252,70 +207,17 @@ func TestErrAlreadyStarted(t *testing.T) {
 	}
 }
 
-func TestAddActionConcurrent(t *testing.T) {
-	t.Parallel()
-	// Note: Cannot use synctest.Test here because this uses OS signals
-
-	var count atomic.Int32
-	fired := make(chan struct{}, 2)
-
-	tsk := sigtrigger.NewTask(sigtrigger.WithSignals(syscall.SIGPIPE))
-
-	// Add action before Run starts.
-	tsk.AddAction(func(_ context.Context) error {
-		count.Add(1)
-		fired <- struct{}{}
-		return nil
-	})
-
-	ctx, cancel := context.WithCancel(t.Context())
-	t.Cleanup(cancel)
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- tsk.Run(ctx) }()
-
-	// Concurrently add another action after Run starts.
-	go func() {
-		tsk.AddAction(func(_ context.Context) error {
-			count.Add(1)
-			return nil
-		})
-	}()
-
-	// Give goroutines a moment to settle, then send a signal.
-	time.Sleep(5 * time.Millisecond)
-	sendSignal(t, syscall.SIGPIPE)
-
-	timer := time.NewTimer(waitTime)
-	t.Cleanup(func() { timer.Stop() })
-	select {
-	case <-fired:
-		// At least the first action ran.
-		assert.GreaterOrEqual(t, count.Load(), int32(1))
-	case <-timer.C:
-		t.Fatal("action was not called after signal")
-	}
-
-	cancel()
-	select {
-	case err := <-errCh:
-		require.NoError(t, err)
-	case <-time.After(waitTime):
-		t.Fatal("task did not stop after context cancel")
-	}
-}
-
 func TestSignalFiresMultipleTimes(t *testing.T) {
 	t.Parallel()
 	// Note: Cannot use synctest.Test here because this uses OS signals
 
 	fired := make(chan struct{}, 10)
 	tsk := sigtrigger.NewTask(
-		sigtrigger.WithSignals(syscall.SIGURG),
-		sigtrigger.WithAction(func(_ context.Context) error {
+		func(_ context.Context) error {
 			fired <- struct{}{}
 			return nil
-		}),
+		},
+		sigtrigger.WithSignals(syscall.SIGURG),
 	)
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -348,6 +250,6 @@ func TestEmptySignalsPanic(t *testing.T) {
 	t.Parallel()
 
 	assert.Panics(t, func() {
-		sigtrigger.NewTask(sigtrigger.WithSignals())
+		sigtrigger.NewTask(func(_ context.Context) error { return nil }, sigtrigger.WithSignals())
 	})
 }
