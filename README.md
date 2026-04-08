@@ -23,6 +23,7 @@ Manage a group of long-running background tasks that all stop when any one of th
   - [Options](#options)
 - [Subpackages](#subpackages)
   - [ossignal](#ossignal)
+  - [loop](#loop)
 - [Contributing](#contributing)
 - [Security](#security)
 - [Attribution](#attribution)
@@ -50,7 +51,7 @@ type Task interface {
 }
 ```
 
-`Run` should block until the context is cancelled or the task can no longer continue. `Name` provides a human-friendly label used in log output.
+`Run` should block until the context is cancelled or the task can no longer continue. `Run` must return `nil` when the context is cancelled — a non-nil error is treated as a failure and causes the manager to cancel all other tasks. In particular, do not return `ctx.Err()`: `context.Canceled` is a non-nil error and will be treated as a failure. `Name` provides a human-friendly label used in log output.
 
 ## Manager
 
@@ -174,6 +175,47 @@ Other options:
 | `WithSignalLogLevel(level)` | `slog.LevelInfo` | Log level used when a signal is received |
 | `WithSignals(signals...)` | SIGINT, SIGTERM, SIGQUIT | Signals to listen for |
 | `WithOnSignal(fn)` | none | Callback invoked after the signal is logged |
+
+### loop
+
+```text
+github.com/wood-jp/task/loop
+```
+
+A `Task` implementation that repeatedly creates and runs an ephemeral task via a factory function. If the inner task returns `nil`, a new one is created and run again. If the factory or inner task returns an error, it is propagated and triggers shutdown. This enables patterns like "run this worker forever, restarting it cleanly each time it finishes."
+
+```go
+worker := loop.NewTask(
+    func(ctx context.Context) (task.Task, error) {
+        return NewWorker(ctx, db)
+    },
+    "worker",
+    loop.WithLogger(logger),
+)
+
+m := task.NewManager(task.WithLogger(logger))
+m.Run(sig, worker)
+if err := m.Wait(); err != nil {
+    log.Fatal(err)
+}
+```
+
+The delay between runs (default: none) is measured from the completion of one run to the start of the next, so runs never overlap:
+
+```go
+worker := loop.NewTask(factory, "worker",
+    loop.WithDelay(5*time.Second),     // sleep between runs
+    loop.WithInitialDelay(),           // also sleep before the first run
+)
+```
+
+Options:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `WithLogger(logger)` | discard | Logger for per-run start/complete events |
+| `WithDelay(d)` | 0 | Sleep between runs (context-aware) |
+| `WithInitialDelay()` | false | Also apply the delay before the first run |
 
 ## Contributing
 
