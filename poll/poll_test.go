@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/wood-jp/task"
 	"github.com/wood-jp/task/poll"
 )
 
@@ -275,7 +276,7 @@ func TestAlreadyStarted(t *testing.T) {
 		synctest.Wait()
 
 		err := pt.Run(ctx)
-		assert.ErrorIs(t, err, poll.ErrAlreadyStarted)
+		assert.ErrorIs(t, err, task.ErrAlreadyStarted)
 
 		cancel()
 

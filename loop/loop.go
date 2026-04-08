@@ -3,18 +3,12 @@ package loop
 
 import (
 	"context"
-	"errors"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
 	"github.com/wood-jp/task"
 	"github.com/wood-jp/xerrors/errcontext"
-	"github.com/wood-jp/xerrors/stacktrace"
 )
-
-// ErrAlreadyStarted is returned when Run is called on a Task that is already running.
-var ErrAlreadyStarted = errors.New("loop task already started")
 
 // Factory is a function that creates a new [task.Task] for each loop iteration.
 type Factory func(context.Context) (task.Task, error)
@@ -28,7 +22,7 @@ type Task struct {
 	logger       *slog.Logger
 	delay        time.Duration
 	initialDelay bool
-	started      atomic.Bool
+	guard        task.Guard
 }
 
 type options struct {
@@ -80,10 +74,10 @@ func (t *Task) Name() string { return t.name }
 
 // Run loops forever: call factory, run the produced task, repeat.
 // Exits without error when ctx is cancelled. Propagates any factory or task error.
-// Returns ErrAlreadyStarted if called more than once.
+// Returns [task.ErrAlreadyStarted] if called more than once.
 func (t *Task) Run(ctx context.Context) error {
-	if !t.started.CompareAndSwap(false, true) {
-		return stacktrace.Wrap(ErrAlreadyStarted)
+	if err := t.guard.TryStart(); err != nil {
+		return err
 	}
 
 	for run := uint64(1); ; run++ {

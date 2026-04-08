@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	taskpkg "github.com/wood-jp/task"
 	"github.com/wood-jp/task/ossignal"
 )
 
@@ -192,7 +193,7 @@ func TestAlreadyStarted(t *testing.T) {
 
 	// Second call should return ErrAlreadyStarted immediately.
 	err := task.Run(ctx)
-	assert.ErrorIs(t, err, ossignal.ErrAlreadyStarted)
+	assert.ErrorIs(t, err, taskpkg.ErrAlreadyStarted)
 
 	// Clean up: cancel context so the first Run returns.
 	cancel()

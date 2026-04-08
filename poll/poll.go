@@ -3,16 +3,11 @@ package poll
 
 import (
 	"context"
-	"errors"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
-	"github.com/wood-jp/xerrors/stacktrace"
+	"github.com/wood-jp/task"
 )
-
-// ErrAlreadyStarted is returned when Run is called on a Task that is already running.
-var ErrAlreadyStarted = errors.New("poll task already started")
 
 // Action is a function executed on each poll interval.
 // It must return nil when the context is cancelled; a non-nil error
@@ -30,7 +25,7 @@ type Task struct {
 	logger          *slog.Logger
 	runAtStart      bool
 	continueOnError bool
-	started         atomic.Bool
+	guard           task.Guard
 }
 
 type options struct {
@@ -91,8 +86,8 @@ func (t *Task) Name() string { return t.name }
 // or until the action returns an error (when WithContinueOnError is not set).
 // Returns ErrAlreadyStarted if called more than once.
 func (t *Task) Run(ctx context.Context) error {
-	if !t.started.CompareAndSwap(false, true) {
-		return stacktrace.Wrap(ErrAlreadyStarted)
+	if err := t.guard.TryStart(); err != nil {
+		return err
 	}
 
 	ticker := time.NewTicker(t.interval)
