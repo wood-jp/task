@@ -21,10 +21,12 @@ Manage a group of long-running background tasks that all stop when any one of th
   - [Cleanup](#cleanup)
   - [Waiting and stopping](#waiting-and-stopping)
   - [Options](#options)
+- [Guard](#guard)
 - [Subpackages](#subpackages)
   - [ossignal](#ossignal)
   - [loop](#loop)
   - [poll](#poll)
+  - [sigtrigger](#sigtrigger)
 - [Contributing](#contributing)
 - [Security](#security)
 - [Attribution](#attribution)
@@ -135,6 +137,26 @@ err := m.Stop()
 | `WithContext(ctx)` | `context.Background()` | Parent context; cancellation triggers shutdown |
 | `WithShutdownTimeout(d)` | 30s | How long to wait for tasks to stop after cancellation |
 | `WithCleanupTimeout(d)` | 10s | Total time budget for all cleanup functions |
+
+## Guard
+
+`Guard` prevents a task's `Run` method from being called more than once. Embed it in any `Task` struct and call `TryStart` at the top of `Run`:
+
+```go
+type MyTask struct {
+    task.Guard
+    // ...
+}
+
+func (t *MyTask) Run(ctx context.Context) error {
+    if err := t.Guard.TryStart(); err != nil {
+        return err // returns task.ErrAlreadyStarted on the second call
+    }
+    // ...
+}
+```
+
+`TryStart` returns `nil` on the first call and a wrapped `ErrAlreadyStarted` on all subsequent calls. `ErrAlreadyStarted` is a sentinel error in the root `task` package and can be tested with `errors.Is`.
 
 ## Subpackages
 
@@ -260,6 +282,54 @@ Options:
 | `WithLogger(logger)` | discard | Logger used when `WithContinueOnError` is active |
 | `WithRunAtStart()` | false | Execute the action immediately before the first tick |
 | `WithContinueOnError()` | false | Log action errors and keep ticking instead of propagating |
+
+### sigtrigger
+
+```text
+github.com/wood-jp/task/sigtrigger
+```
+
+A `Task` implementation that executes an action each time a configured OS signal is received. Unlike `ossignal`, which exits on the first signal, `sigtrigger` stays alive and re-runs the action on every signal delivery. Signal capture begins at construction time, so no signals are missed between `NewTask` and `Run`.
+
+```go
+trig := sigtrigger.NewTask(
+    func(ctx context.Context) error {
+        return reloadConfig(ctx)
+    },
+    sigtrigger.WithLogger(logger),
+)
+
+m := task.NewManager(task.WithLogger(logger))
+m.Run(sig, trig, server)
+if err := m.Wait(); err != nil {
+    log.Fatal(err)
+}
+```
+
+By default, `sigtrigger.NewTask` listens for `SIGHUP`. Override with `WithSignals`:
+
+```go
+trig := sigtrigger.NewTask(action,
+    sigtrigger.WithSignals(syscall.SIGUSR1),
+)
+```
+
+By default, an error from the action propagates and terminates the task (triggering manager shutdown). Use `WithContinueOnError` to log the error and keep running instead:
+
+```go
+trig := sigtrigger.NewTask(action,
+    sigtrigger.WithContinueOnError(),
+    sigtrigger.WithLogger(logger),
+)
+```
+
+Options:
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `WithLogger(logger)` | discard | Logger for signal receipt and (with `WithContinueOnError`) action errors |
+| `WithSignals(signals...)` | SIGHUP | Signals to listen for |
+| `WithContinueOnError()` | false | Log action errors and keep running instead of propagating |
 
 ## Contributing
 
