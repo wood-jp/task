@@ -3,6 +3,10 @@ package task
 
 import "context"
 
+// Action is a function that performs a unit of work. It must return nil when
+// the context is cancelled.
+type Action func(context.Context) error
+
 // Task represents a background service.
 type Task interface {
 	// Run must execute the work of this service and block until the context

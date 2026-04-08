@@ -16,9 +16,6 @@ import (
 	"github.com/wood-jp/task"
 )
 
-// Action is a function executed each time a configured signal fires.
-type Action func(context.Context) error
-
 // DefaultSignals returns the default signal list: [SIGHUP].
 func DefaultSignals() []os.Signal {
 	return []os.Signal{syscall.SIGHUP}
@@ -28,7 +25,7 @@ func DefaultSignals() []os.Signal {
 // received. It stays alive until the context is cancelled.
 type Task struct {
 	sigCh           chan os.Signal
-	action          Action
+	action          task.Action
 	continueOnError bool
 	logger          *slog.Logger
 	name            string
@@ -66,7 +63,7 @@ func WithContinueOnError() Option {
 // NewTask creates a new [Task] that calls action on each signal delivery.
 // Signal capture begins immediately upon construction.
 // Panics if the resolved signals list is empty.
-func NewTask(action Action, opts ...Option) *Task {
+func NewTask(action task.Action, opts ...Option) *Task {
 	o := options{
 		signals: DefaultSignals(),
 		logger:  slog.New(slog.DiscardHandler),
