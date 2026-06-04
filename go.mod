@@ -1,10 +1,10 @@
 module github.com/wood-jp/task
 
-go 1.26.1
+go 1.26.4
 
 require (
 	github.com/stretchr/testify v1.11.1
-	github.com/wood-jp/xerrors v1.1.1
+	github.com/wood-jp/xerrors v1.1.3
 )
 
 require (
